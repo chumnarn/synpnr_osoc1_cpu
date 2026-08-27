@@ -1,0 +1,8 @@
+nix-shell ~/openlane2/shell.nix
+
+[nix-shell:~/vlsi_projects/osoc1/work]$ yosys
+yosys -l syn.log
+
+
+
+[nix-shell:~/vlsi_projects/osoc1/work]$ openroad

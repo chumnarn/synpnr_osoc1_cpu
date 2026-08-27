@@ -1,0 +1,18 @@
+# Ignore tool logs and reports
+*.log
+*.rpt
+*.txt
+
+# Ignore physical design databases (these get huge)
+*.odb
+*.def
+*.lef
+*.spef
+
+# Ignore temporary Yosys outputs (unless specifically needed for demo)
+*.dot
+*.png
+*.jpg
+
+# Ignore compiled binaries
+sv2v-Linux

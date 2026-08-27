@@ -1,0 +1,5 @@
+./../sv2v-Linux/sv2v -I ../src/ ../src/cpu_sv_package.sv ../src/*.sv > ../src_sv2v/osoc1_cpu_core.flat.v
+
+yosys -e ".*" -s ../scripts/synth_osoc1_cpu_core.tcl | tee ./logs/osoc1_cpu_core_syn.log
+
+
