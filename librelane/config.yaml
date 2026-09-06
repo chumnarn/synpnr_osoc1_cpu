@@ -1,0 +1,80 @@
+# LibreLane Full Chip Configuration — synpnr_osoc1_cpu
+# IHP SG13G2 | LibreLane Chip Flow
+
+DESIGN_NAME: chip_top
+
+# Source Files
+VERILOG_FILES:
+  - dir::../src/osoc1_cpu.sv      # CPU RTL (และ sub-modules)
+  - dir::../src/chip_core.sv
+  - dir::../src/chip_top.sv
+
+# Chip Flow (แทน Classic Flow)
+FLOW: Chip
+
+# Clock Constraints
+CLOCK_PORT: clk_pad
+CLOCK_PERIOD: 20   # 20ns = 50 MHz (ปรับตาม timing closure)
+
+# Floorplan — ขนาดชิป (micrometers)
+# ปรับขนาดตาม complexity ของ osoc1_cpu
+DIE_AREA: "0 0 1500 1500"        # 1.5mm x 1.5mm
+CORE_AREA: "200 200 1300 1300"   # Core area ด้านใน pad ring
+
+# Standard Cell Library
+STD_CELL_LIBRARY: sg13g2_stdcell
+
+# Target density (0.0–1.0) — เริ่มต้นที่ 0.4 แล้วค่อยปรับ
+PL_TARGET_DENSITY: 0.4
+
+# IO Pad Placement — South / East / North / West
+# Format: {instance_name: PAD_TYPE}
+PAD_SOUTH:
+  - {vssdio_0: sg13g2_IOCellVddio}
+  - {vdddio_0: sg13g2_IOCellVssdio}
+  - {gpio_in_0: sg13g2_IOCellInput}
+  - {gpio_in_1: sg13g2_IOCellInput}
+  - {vssdio_1: sg13g2_IOCellVssio}
+  - {vdddio_1: sg13g2_IOCellVddio}
+
+PAD_EAST:
+  - {gpio_out_0: sg13g2_IOCellOutput}
+  - {gpio_out_1: sg13g2_IOCellOutput}
+  - {vss_0: sg13g2_IOCellVss}
+  - {vdd_0: sg13g2_IOCellVdd}
+
+PAD_NORTH:
+  - {gpio_in_2: sg13g2_IOCellInput}
+  - {gpio_in_3: sg13g2_IOCellInput}
+  - {clk_pad_0: sg13g2_IOCellInput}
+  - {rst_n_pad_0: sg13g2_IOCellInput}
+  - {vdd_1: sg13g2_IOCellVdd}
+  - {vss_1: sg13g2_IOCellVss}
+
+PAD_WEST:
+  - {gpio_out_2: sg13g2_IOCellOutput}
+  - {gpio_out_3: sg13g2_IOCellOutput}
+  - {vdddio_2: sg13g2_IOCellVddio}
+  - {vssdio_2: sg13g2_IOCellVssio}
+
+# Power Domain
+VDD_NET: VDD
+VSS_NET: VSS
+
+# SystemVerilog — เปิด Slang parser สำหรับ full SV support
+USE_SLANG: true
+
+# Synthesis
+SYNTH_STRATEGY: DELAY 0         # เน้น timing ก่อน area
+
+# CTS
+CLOCK_TREE_SYNTH: true
+
+# Routing
+GRT_ALLOW_CONGESTION: false
+
+# DRC (ผ่าน KLayout)
+RUN_KLAYOUT_DRC: true
+
+# LVS (ผ่าน Netgen)
+RUN_LVS: true
