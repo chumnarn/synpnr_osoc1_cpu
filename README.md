@@ -1,875 +1,2484 @@
-# Full Chip Implementation: synpnr_osoc1_cpu ด้วย LibreLane และ IHP SG13G2 PDK
+# Full-Chip Implementation of `synpnr_osoc1_cpu`
+## ด้วย LibreLane และ IHP SG13G2 Open PDK
 
-**Version:** 1.0  
-**Last Updated:** September 2026  
-**Duration:** ~4–6 ชั่วโมง (แบ่งเป็น 6 Labs)  
-**Level:** Intermediate  
-**Target:** นักศึกษาและวิศวกร ASIC ที่มีพื้นฐาน RTL และ Linux  
-**Repository:** [ChipDesignRashid/synpnr_osoc1_cpu](https://github.com/ChipDesignRashid/synpnr_osoc1_cpu)
-
----
-
-## ภาพรวมของ Workshop
-
-คู่มือนี้แนะนำกระบวนการ **Full Chip Implementation** ของโปรเซสเซอร์ `osoc1_cpu` ตั้งแต่ขั้นตอนการเตรียม RTL (SystemVerilog) ไปจนถึงการสร้างไฟล์ GDSII พร้อม Pad Ring ที่พร้อมส่ง Tapeout บน **IHP SG13G2 130nm BiCMOS Open-Source PDK** โดยใช้เครื่องมือ **LibreLane** ซึ่งเป็นโครงสร้างพื้นฐาน RTL-to-GDS แบบ open-source ที่สืบต่อจาก OpenLane
-
-**หลังจากทำ Lab ครบทุก Lab แล้ว ผู้เรียนจะสามารถ:**
-
-- ติดตั้งและใช้งาน LibreLane ผ่าน Nix Environment ได้
-- เตรียม RTL SystemVerilog ให้พร้อมสำหรับ synthesis บน IHP SG13G2
-- สร้างและปรับแต่ง `config.yaml` สำหรับ Full Chip Flow (Chip Flow)
-- กำหนดตำแหน่ง IO Pad Ring รอบชิป
-- รัน Place-and-Route และแก้ไข Timing/DRC violations ได้
-- ตรวจสอบ Layout ผ่าน KLayout และ OpenROAD GUI
-- รัน Gate-Level Simulation เพื่อ verify ความถูกต้อง
-- ส่ง GDSII ที่ผ่าน DRC และ LVS สำหรับ Tapeout
+**Target design:** `synpnr_osoc1_cpu`  
+**Original repository:** ChipDesignRashid/synpnr_osoc1_cpu  
+**Working fork:** chumnarn/synpnr_osoc1_cpu  
+**Implementation flow:** LibreLane Chip Flow  
+**Target technology:** IHP SG13G2 130-nm BiCMOS Open PDK  
+**Implementation style:** RTL → Synthesis → Floorplan → Pad Ring → PDN → Placement → CTS → Routing → Signoff → GDSII
 
 ---
 
-## โครงสร้างของ Repository: synpnr_osoc1_cpu
+# 1. วัตถุประสงค์ของบทนี้
 
-```
-synpnr_osoc1_cpu/
-├── src/                  # RTL หลัก (SystemVerilog)
-│   └── osoc1_cpu.sv      # Top-level CPU module
-├── src_sv2v/             # RTL ที่แปลงผ่าน sv2v แล้ว (Verilog plain)
-├── syn_netlist/          # Synthesized netlist (Yosys output)
-├── sdc/                  # Synopsys Design Constraints
-├── scripts/              # Script สำหรับ flow automation
-├── doc/                  # เอกสารประกอบ
-└── .gitignore
+บทนี้อธิบายการนำ CPU RTL จากโครงการ `synpnr_osoc1_cpu` มาพัฒนาเป็น **Full-Chip ASIC** ที่ประกอบด้วย
+
+```text
+          +---------------------------------------+
+          |               chip_top                |
+          |                                       |
+clk_PAD --> IHP Input Pad                         |
+rst_PAD --> IHP Input Pad                         |
+          |          +------------------+         |
+          |          |    chip_core     |         |
+          |          |                  |         |
+          |          | +--------------+ |         |
+          |          | | osoc1_cpu    | |         |
+          |          | |    core      | |         |
+          |          | +--------------+ |         |
+          |          |        |         |         |
+          |          | test ROM / RAM   |         |
+          |          +------------------+         |
+          |                    |                  |
+          |            IHP Output Pads ---------> |
+          |                                       |
+          | VDD/VSS + IOVDD/IOVSS Pads            |
+          +---------------------------------------+
 ```
 
-> 📝 **หมายเหตุ:** โมดูลหลัก `osoc1_cpu` เป็น RISC-style CPU ที่เขียนด้วย SystemVerilog  
-> ในการทำ Full Chip จะต้องสร้าง `chip_top` wrapper module ครอบ `osoc1_cpu` เพื่อเชื่อมกับ IO Pad Ring
+เป้าหมายแรกของ implementation นี้ไม่ใช่การสร้าง SoC ที่สมบูรณ์ แต่เป็นการสร้าง **CPU test chip ที่สามารถตรวจสอบการทำงานทางกายภาพได้ง่าย**
 
----
+แนวคิดคือให้ CPU execute คำสั่ง `NOP` อย่างต่อเนื่อง และนำบางบิตของ Program Counter ออกสู่ output pads
 
-## Prerequisites
+ดังนั้นเมื่อ clock ทำงาน จะสามารถสังเกตได้ว่า
 
-### ความรู้ที่จำเป็น
-
-- พื้นฐาน Linux command line และ shell scripting
-- เข้าใจ RTL design ใน SystemVerilog / Verilog
-- เข้าใจ Digital Design flow (Synthesis → Place & Route → Verification)
-- รู้จัก YAML และ JSON format เบื้องต้น
-
-### Software ที่ต้องติดตั้งก่อน
-
-| Tool | Version | ลิงก์ |
-|------|---------|-------|
-| Nix Package Manager | ≥ 2.18 | https://nixos.org/download |
-| LibreLane (via Nix) | ≥ 3.0 | https://librelane.readthedocs.io |
-| Git | ≥ 2.30 | https://git-scm.com |
-| KLayout | ≥ 0.28 | https://www.klayout.de (optional, สำหรับ view GDS) |
-| GTKWave | ≥ 3.3 | https://gtkwave.github.io/gtkwave/ (optional, สำหรับ simulation) |
-
-### Hardware Requirements
-
-- OS: Linux (Ubuntu 22.04+ แนะนำ) หรือ macOS
-- RAM: ≥ 16 GB (แนะนำ 32 GB สำหรับ CPU design)
-- Disk: ≥ 50 GB free (PDK + LibreLane + run outputs)
-- CPU: ≥ 8 cores แนะนำ (PnR ใช้ multithread)
-
----
-
-## Lab 1: ติดตั้ง LibreLane และเตรียม Environment
-
-**เวลาโดยประมาณ:** 30–45 นาที  
-**Objective:** ติดตั้ง LibreLane ผ่าน Nix, clone IHP template, และตรวจสอบว่า environment พร้อม
-
-### พื้นหลัง
-
-LibreLane ใช้ **Nix** เป็นตัวจัดการ environment เพื่อให้แน่ใจว่าทุก tool (Yosys, OpenROAD, KLayout, Netgen ฯลฯ) มี version ที่ถูกต้องและ reproducible ทุกครั้ง  
-IHP SG13G2 PDK จะถูก download อัตโนมัติโดย **Ciel** (PDK version manager) ในการรันครั้งแรก
-
-### ขั้นตอน
-
-1. ติดตั้ง Nix Package Manager ด้วย Determinate Systems installer:
-
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-     sh -s -- install
-   ```
-
-   เปิด terminal ใหม่หลังติดตั้งเสร็จ แล้วตรวจสอบ:
-
-   ```bash
-   nix --version
-   ```
-
-   > ✅ **จุดตรวจสอบ:** ควรเห็นผลลัพธ์ประมาณ `nix (Nix) 2.x.x`
-
-2. Clone `ihp-sg13g2-librelane-template` ซึ่งเป็น official template สำหรับ Full Chip:
-
-   ```bash
-   git clone https://github.com/IHP-GmbH/ihp-sg13g2-librelane-template.git
-   cd ihp-sg13g2-librelane-template
-   ```
-
-3. เข้า Nix Shell (ครั้งแรกจะใช้เวลาดาวน์โหลด binary cache ประมาณ 10–20 นาที):
-
-   ```bash
-   nix-shell
-   ```
-
-   > ⚠️ **คำเตือน:** ห้ามออกจาก nix-shell ระหว่างรัน flow ทุกคำสั่งต้องรันภายใน nix-shell
-
-4. Download IHP SG13G2 PDK ผ่าน Makefile:
-
-   ```bash
-   make clone-pdk
-   ```
-
-   PDK จะถูกเก็บที่ `~/.ciel/` (ใช้พื้นที่ประมาณ 3–5 GB)
-
-5. ตรวจสอบการติดตั้ง LibreLane:
-
-   ```bash
-   librelane --smoke-test
-   ```
-
-### Expected Result
-
-```
-LibreLane smoke test passed.
+```text
+PC = 0x00000000
+PC = 0x00000004
+PC = 0x00000008
+PC = 0x0000000C
+...
 ```
 
-### Troubleshooting
+และใช้ `PC[9:2]` เป็น observable output
 
-| ปัญหา | วิธีแก้ไข |
-|-------|-----------|
-| `nix: command not found` | ตรวจสอบว่าเปิด terminal ใหม่หลัง install Nix แล้ว หรือรัน `source /etc/bashrc` |
-| `nix-shell` ค้างนาน | เพิ่ม `--substituters https://cache.nixos.org` หรือตรวจสอบ network |
-| `make clone-pdk` fail | ตรวจสอบ git, disk space, และ network |
-| smoke-test fail | ดู error message แล้วเปิด issue ที่ https://github.com/librelane/librelane |
-
----
-
-## Lab 2: Clone และเตรียม RTL จาก synpnr_osoc1_cpu
-
-**เวลาโดยประมาณ:** 30 นาที  
-**Objective:** นำ RTL ของ `osoc1_cpu` มาเตรียมใน template structure และสร้าง `chip_top` wrapper module
-
-### พื้นหลัง
-
-ใน **Full Chip Flow** ของ LibreLane จะต้องมี module สองระดับ:
-- `chip_top` — Top-level ที่ประกอบ IO pads เข้ากับ core logic ผ่าน pad interface
-- `chip_core` — Core ที่บรรจุ logic จริง ซึ่งในกรณีนี้คือ `osoc1_cpu`
-
-### ขั้นตอน
-
-1. Clone repository ของ `synpnr_osoc1_cpu`:
-
-   ```bash
-   # จากภายใน ihp-sg13g2-librelane-template/
-   cd ..
-   git clone https://github.com/ChipDesignRashid/synpnr_osoc1_cpu.git
-   ```
-
-2. ดู structure ของ src ไดเรกทอรี:
-
-   ```bash
-   ls synpnr_osoc1_cpu/src/
-   ls synpnr_osoc1_cpu/src_sv2v/
-   ```
-
-3. คัดลอก RTL files เข้า template:
-
-   ```bash
-   cp synpnr_osoc1_cpu/src/*.sv ihp-sg13g2-librelane-template/src/
-   cp synpnr_osoc1_cpu/sdc/*.sdc ihp-sg13g2-librelane-template/src/ 2>/dev/null || true
-   ```
-
-4. สร้าง `chip_top.sv` ซึ่งเป็น top-level pad wrapper ใน `src/`:
-
-   ```bash
-   cat > ihp-sg13g2-librelane-template/src/chip_top.sv << 'EOF'
-   // chip_top.sv — Top-level full chip wrapper for osoc1_cpu
-   // IHP SG13G2 — LibreLane Full Chip Flow
-   
-   module chip_top #(
-     parameter int NUM_VDD_PADS   = 2,
-     parameter int NUM_VSS_PADS   = 2,
-     parameter int NUM_IOVDD_PADS = 2,
-     parameter int NUM_IOVSS_PADS = 2,
-     parameter int NUM_INPUT_PADS = 4,
-     parameter int NUM_OUTPUT_PADS = 4,
-     parameter int NUM_BIDIR_PADS  = 0,
-     parameter int NUM_ANALOG_PADS = 0
-   ) (
-     input  logic clk_pad,
-     input  logic rst_n_pad,
-     input  logic [NUM_INPUT_PADS-1:0]  gpio_in_pad,
-     output logic [NUM_OUTPUT_PADS-1:0] gpio_out_pad
-   );
-   
-     // Internal signals (after pad buffer)
-     logic clk_i, rst_ni;
-     logic [NUM_INPUT_PADS-1:0]  gpio_in;
-     logic [NUM_OUTPUT_PADS-1:0] gpio_out;
-   
-     // Instantiate chip_core (contains osoc1_cpu)
-     chip_core u_chip_core (
-       .clk_i     (clk_i),
-       .rst_ni    (rst_ni),
-       .gpio_in   (gpio_in),
-       .gpio_out  (gpio_out)
-     );
-   
-   endmodule
-   EOF
-   ```
-
-5. สร้าง `chip_core.sv` ที่ instantiate `osoc1_cpu`:
-
-   ```bash
-   cat > ihp-sg13g2-librelane-template/src/chip_core.sv << 'EOF'
-   // chip_core.sv — Core logic wrapper instantiating osoc1_cpu
-   
-   module chip_core (
-     input  logic clk_i,
-     input  logic rst_ni,
-     input  logic [3:0] gpio_in,
-     output logic [3:0] gpio_out
-   );
-   
-     // Instantiate osoc1_cpu — ปรับ port names ตาม module จริง
-     osoc1_cpu u_cpu (
-       .clk   (clk_i),
-       .rst_n (rst_ni),
-       // TODO: เชื่อม GPIO และ port อื่นๆ ตาม interface ของ osoc1_cpu
-       .gpio_in  (gpio_in),
-       .gpio_out (gpio_out)
-     );
-   
-   endmodule
-   EOF
-   ```
-
-   > ⚠️ **คำเตือน:** ตรวจสอบ port names ของ `osoc1_cpu` จาก `src/osoc1_cpu.sv` ก่อนแล้วปรับ instantiation ให้ตรง
-
-6. ตรวจสอบ RTL files ที่มีอยู่:
-
-   ```bash
-   ls ihp-sg13g2-librelane-template/src/
-   ```
-
-   > ✅ **จุดตรวจสอบ:** ควรเห็น `chip_top.sv`, `chip_core.sv`, และ `osoc1_cpu.sv` (หรือไฟล์ RTL อื่นๆ)
-
-### Expected Result
-
-Directory `src/` ควรมีไฟล์เหล่านี้:
-- `chip_top.sv` — Top-level pad wrapper
-- `chip_core.sv` — Core wrapper
-- `osoc1_cpu.sv` — CPU RTL (และ module ย่อยอื่นๆ ที่ osoc1 ต้องการ)
-
----
-
-## Lab 3: ตั้งค่า LibreLane config.yaml สำหรับ Full Chip (Chip Flow)
-
-**เวลาโดยประมาณ:** 45 นาที  
-**Objective:** สร้างและปรับแต่ง `config.yaml` สำหรับ Chip Flow รวมถึงกำหนด IO Pad placement
-
-### พื้นหลัง
-
-LibreLane ใช้ `config.yaml` ไฟล์เดียวในการกำหนดทุกอย่างในสาย implementation ตั้งแต่ source files, clock period, floorplan dimensions ไปจนถึงตำแหน่ง pads รอบชิป  
-**Chip Flow** แตกต่างจาก **Classic Flow** ตรงที่จะทำ: Pad Ring Assembly → Core PnR → Seal Ring insertion → Filler generation → DRC/LVS
-
-### ขั้นตอน
-
-1. ไปที่ไดเรกทอรี `librelane/`:
-
-   ```bash
-   cd ihp-sg13g2-librelane-template/librelane/
-   ls
-   ```
-
-   ควรเห็น `config.yaml` (ของ template เดิม)
-
-2. แก้ไข `config.yaml` ด้วย editor ที่ถนัด (nano, vim, code ฯลฯ):
-
-   ```bash
-   cp config.yaml config.yaml.bak   # สำรอง config เดิม
-   nano config.yaml
-   ```
-
-3. ปรับค่า config ดังนี้ (ตัวอย่าง config.yaml สำหรับ osoc1_cpu):
-
-   ```yaml
-   # LibreLane Full Chip Configuration — synpnr_osoc1_cpu
-   # IHP SG13G2 | LibreLane Chip Flow
-   
-   DESIGN_NAME: chip_top
-   
-   # Source Files
-   VERILOG_FILES:
-     - dir::../src/osoc1_cpu.sv      # CPU RTL (และ sub-modules)
-     - dir::../src/chip_core.sv
-     - dir::../src/chip_top.sv
-   
-   # Chip Flow (แทน Classic Flow)
-   FLOW: Chip
-   
-   # Clock Constraints
-   CLOCK_PORT: clk_pad
-   CLOCK_PERIOD: 20   # 20ns = 50 MHz (ปรับตาม timing closure)
-   
-   # Floorplan — ขนาดชิป (micrometers)
-   # ปรับขนาดตาม complexity ของ osoc1_cpu
-   DIE_AREA: "0 0 1500 1500"        # 1.5mm x 1.5mm
-   CORE_AREA: "200 200 1300 1300"   # Core area ด้านใน pad ring
-   
-   # Standard Cell Library
-   STD_CELL_LIBRARY: sg13g2_stdcell
-   
-   # Target density (0.0–1.0) — เริ่มต้นที่ 0.4 แล้วค่อยปรับ
-   PL_TARGET_DENSITY: 0.4
-   
-   # IO Pad Placement — South / East / North / West
-   # Format: {instance_name: PAD_TYPE}
-   PAD_SOUTH:
-     - {vssdio_0: sg13g2_IOCellVddio}
-     - {vdddio_0: sg13g2_IOCellVssdio}
-     - {gpio_in_0: sg13g2_IOCellInput}
-     - {gpio_in_1: sg13g2_IOCellInput}
-     - {vssdio_1: sg13g2_IOCellVssio}
-     - {vdddio_1: sg13g2_IOCellVddio}
-   
-   PAD_EAST:
-     - {gpio_out_0: sg13g2_IOCellOutput}
-     - {gpio_out_1: sg13g2_IOCellOutput}
-     - {vss_0: sg13g2_IOCellVss}
-     - {vdd_0: sg13g2_IOCellVdd}
-   
-   PAD_NORTH:
-     - {gpio_in_2: sg13g2_IOCellInput}
-     - {gpio_in_3: sg13g2_IOCellInput}
-     - {clk_pad_0: sg13g2_IOCellInput}
-     - {rst_n_pad_0: sg13g2_IOCellInput}
-     - {vdd_1: sg13g2_IOCellVdd}
-     - {vss_1: sg13g2_IOCellVss}
-   
-   PAD_WEST:
-     - {gpio_out_2: sg13g2_IOCellOutput}
-     - {gpio_out_3: sg13g2_IOCellOutput}
-     - {vdddio_2: sg13g2_IOCellVddio}
-     - {vssdio_2: sg13g2_IOCellVssio}
-   
-   # Power Domain
-   VDD_NET: VDD
-   VSS_NET: VSS
-   
-   # SystemVerilog — เปิด Slang parser สำหรับ full SV support
-   USE_SLANG: true
-   
-   # Synthesis
-   SYNTH_STRATEGY: DELAY 0         # เน้น timing ก่อน area
-   
-   # CTS
-   CLOCK_TREE_SYNTH: true
-   
-   # Routing
-   GRT_ALLOW_CONGESTION: false
-   
-   # DRC (ผ่าน KLayout)
-   RUN_KLAYOUT_DRC: true
-   
-   # LVS (ผ่าน Netgen)
-   RUN_LVS: true
-   ```
-
-   > 💡 **เคล็ดลับ:** ดู IO Cell types ที่มีอยู่ใน IHP SG13G2 จาก:  
-   > `~/.ciel/ihp-sg13g2/libs.ref/sg13g2_io/`  
-   > หรือ [IHP OpenPDK IO Library docs](https://ihp-open-pdk-docs.readthedocs.io/en/latest/contents/io_library/01_available_cells.html)
-
-4. ตรวจสอบชื่อ IO Cell types จาก PDK:
-
-   ```bash
-   ls ~/.ciel/ihp-sg13g2/libs.ref/sg13g2_io/lef/ | head -20
-   ```
-
-5. ปรับ `PAD_SOUTH/EAST/NORTH/WEST` ให้ตรงกับ port ของ `chip_top`:
-   - Port `clk_pad` → `sg13g2_IOCellInput`
-   - Port `rst_n_pad` → `sg13g2_IOCellInput`
-   - Port `gpio_in[3:0]` → 4x `sg13g2_IOCellInput`
-   - Port `gpio_out[3:0]` → 4x `sg13g2_IOCellOutput`
-   - Power/Ground → `sg13g2_IOCellVdd/Vss/Vddio/Vssio`
-
-6. บันทึกไฟล์ config.yaml
-
-   > ✅ **จุดตรวจสอบ:** Validate YAML syntax:
-   > ```bash
-   > python3 -c "import yaml; yaml.safe_load(open('config.yaml'))" && echo "YAML valid"
-   > ```
-
-### Expected Result
-
-ได้ `config.yaml` ที่ valid ซึ่งกำหนด Chip Flow, RTL sources, clock constraint, floorplan, และ pad placement ครบถ้วน
-
----
-
-## Lab 4: รัน Full Chip Implementation Flow
-
-**เวลาโดยประมาณ:** 60–120 นาที (ขึ้นอยู่กับ CPU ของเครื่อง)  
-**Objective:** รัน LibreLane Chip Flow ผ่าน Makefile และติดตาม log เพื่อตรวจสอบ error
-
-### พื้นหลัง
-
-LibreLane **Chip Flow** ทำขั้นตอนต่อไปนี้โดยอัตโนมัติ:
-
-```
-RTL (.sv)
-  ↓ [Yosys.Synthesis]
-Gate-Level Netlist
-  ↓ [OpenROAD.Floorplan]
-Floorplan DEF
-  ↓ [OpenROAD.PadRing]        ← Pad ring assembly (Chip Flow เท่านั้น)
-Padded Floorplan
-  ↓ [OpenROAD.GlobalPlacement]
-Globally Placed DEF
-  ↓ [OpenROAD.STAPrePNR]      ← Static Timing Analysis (pre-route)
-  ↓ [OpenROAD.CTS]            ← Clock Tree Synthesis
-  ↓ [OpenROAD.GlobalRouting]
-  ↓ [OpenROAD.DetailedRouting]
-Routed DEF
-  ↓ [OpenROAD.STAPostPNR]     ← Static Timing Analysis (post-route)
-  ↓ [KLayout.SealRing]        ← Seal Ring insertion
-  ↓ [KLayout.Filler]          ← Metal/Poly filler
-  ↓ [KLayout.DRC]             ← Design Rule Check
-  ↓ [Netgen.LVS]              ← Layout vs Schematic
-GDSII ✓
+```text
+output_PAD[7:0] = PC[9:2]
 ```
 
-### ขั้นตอน
+วิธีนี้มีข้อดีคือ
 
-1. กลับไปที่ root ของ template repository:
+- ไม่ต้องนำ memory bus 32-bit จำนวนมากออก pad
+- ไม่ต้องใช้ SRAM macro ตั้งแต่ iteration แรก
+- ตรวจสอบ CPU datapath ได้
+- ตรวจสอบ clock/reset path ได้
+- ทำ Full-Chip Pad Ring ได้ด้วยจำนวน pad ที่เหมาะสม
+- เหมาะสำหรับใช้เป็น baseline ก่อนเพิ่ม SRAM/UART/GPIO ในขั้นต่อไป
 
-   ```bash
-   cd ihp-sg13g2-librelane-template/
-   ```
+---
 
-2. ตรวจสอบว่าอยู่ใน nix-shell:
+# 2. ทำความเข้าใจ RTL ของ `synpnr_osoc1_cpu`
 
-   ```bash
-   which librelane
-   # ควรแสดง path ที่ชี้ไปใน nix store
-   ```
+Repository เดิมประกอบด้วย module สำคัญ เช่น
 
-   ถ้าไม่ใช่ให้รัน:
-   ```bash
-   nix-shell
-   ```
-
-3. รัน implementation ผ่าน Makefile:
-
-   ```bash
-   make librelane 2>&1 | tee run_$(date +%Y%m%d_%H%M).log
-   ```
-
-   > 💡 **เคล็ดลับ:** การ pipe ผ่าน `tee` จะช่วยให้บันทึก log ไว้ดู error ภายหลังได้
-
-4. ติดตาม progress — LibreLane จะแสดงขั้นตอนและ status:
-
-   ```
-   [INFO] Step 1/20: Yosys.Synthesis
-   [INFO] Step 2/20: OpenROAD.Floorplan
-   ...
-   ```
-
-5. หาก synthesis fail ด้วย `module not found` — ตรวจสอบว่า include RTL files ครบ:
-
-   ```bash
-   # ตรวจสอบ module names ใน RTL
-   grep "^module " src/*.sv
-   ```
-
-   แล้วแก้ `VERILOG_FILES` ใน config.yaml ให้ครบ
-
-6. หาก timing fail — ปรับ `CLOCK_PERIOD` ใน config.yaml ให้ค่าสูงขึ้น (period มากขึ้น = frequency ต่ำลง):
-
-   ```yaml
-   CLOCK_PERIOD: 25   # ลองเพิ่มจาก 20 เป็น 25ns
-   ```
-
-   แล้วรันใหม่:
-   ```bash
-   make librelane
-   ```
-
-7. เมื่อ flow สำเร็จ ดู summary report:
-
-   ```bash
-   ls run/
-   # จะเห็น directory ที่ชื่อตาม timestamp
-   ls run/RUN_*/results/final/
-   ```
-
-   > ✅ **จุดตรวจสอบ:** ดูสถานะ step ทั้งหมด:
-   > ```bash
-   > cat run/RUN_*/final_summary.json | python3 -m json.tool | grep -E '"status"|"step"'
-   > ```
-
-### Expected Result
-
-```
-[SUCCESS] All steps completed successfully.
-DRC: 0 violations
-LVS: Clean
+```text
+src/
+├── alu.sv
+├── alu_in_muxes.sv
+├── bcu.sv
+├── cpu_sv_package.sv
+├── ctrl.sv
+├── decoder.sv
+├── lau.sv
+├── next_pc_logic.sv
+├── osoc1_cpu_core.sv
+├── pc_plus_4.sv
+├── pc_reg.sv
+├── reg_file.sv
+├── rf_wb_mux.sv
+└── sau.sv
 ```
 
-และจะมีไฟล์เหล่านี้ใน `run/RUN_*/results/final/`:
-- `chip_top.gds` — ไฟล์ GDSII ของ full chip
-- `chip_top.lef` — Library Exchange Format
-- `chip_top.v` — Gate-level netlist
-- `chip_top.sdf` — Standard Delay Format (สำหรับ GL simulation)
+Top-level RTL สำหรับ CPU คือ
 
-### Troubleshooting
+```systemverilog
+module osoc1_cpu_core (
+    input  logic        clk_i,
+    input  logic        rst_ni,
 
-| ปัญหา | วิธีแก้ไข |
-|-------|-----------|
-| `Synthesis failed: module not found` | เพิ่ม RTL file ใน `VERILOG_FILES` ใน config.yaml |
-| `Timing not met (WNS < 0)` | เพิ่ม `CLOCK_PERIOD` หรือใช้ `SYNTH_STRATEGY: DELAY 3` |
-| `Routing congestion` | ลด `PL_TARGET_DENSITY` (เช่น 0.35) หรือขยาย `DIE_AREA` |
-| `DRC violations` | ดู Lab 5 สำหรับการแก้ไข DRC |
-| `LVS mismatch` | ตรวจสอบ power connections และ pad connections |
-| `Pad placement error` | ตรวจสอบ pad type names ใน config.yaml |
+    output logic [31:0] pc_o,
+    input  logic [31:0] instr_i,
 
----
+    output logic [3:0]  dmem_we_o,
+    output logic [31:0] dmem_addr_o,
+    output logic [31:0] dmem_wdata_o,
+    input  logic [31:0] dmem_rdata_i
+);
+```
 
-## Lab 5: ตรวจสอบ Layout ด้วย KLayout และ OpenROAD GUI
+CPU จึงมี interface สองกลุ่มหลัก
 
-**เวลาโดยประมาณ:** 30–45 นาที  
-**Objective:** เปิด Layout ใน KLayout และ OpenROAD GUI เพื่อตรวจสอบความถูกต้องของการ place & route
+### Instruction interface
 
-### พื้นหลัง
+```text
+CPU ---> pc_o[31:0] ----> Instruction Memory
+CPU <--- instr_i[31:0] <-- Instruction Memory
+```
 
-ก่อน Tapeout จำเป็นต้องตรวจสอบ Layout ด้วยสายตาว่า Pad Ring, Core, Clock Tree, Power Grid และ Routing ถูกต้อง ไม่มี short circuit หรือ open ที่ผิดปกติ
+### Data interface
 
-### ขั้นตอน
+```text
+CPU ---> dmem_addr_o[31:0]
+CPU ---> dmem_wdata_o[31:0]
+CPU ---> dmem_we_o[3:0]
+CPU <--- dmem_rdata_i[31:0]
+```
 
-1. **เปิดดูใน OpenROAD GUI** (ต้องอยู่ใน nix-shell):
+CPU ไม่มี instruction memory หรือ data memory อยู่ภายในตัวเอง
 
-   ```bash
-   make librelane-openroad
-   ```
+ดังนั้น
 
-   ใน OpenROAD GUI:
-   - ดู **Floorplan**: เส้นขอบชิป, Power Ring, Core Area
-   - ดู **Placement**: standard cells กระจายอยู่ใน core
-   - ดู **Routing**: metal layers และ vias
-   - คลิก **Timing Report** → ตรวจสอบ Setup/Hold slack
+> `osoc1_cpu_core` เป็น CPU core ไม่ใช่ SoC
 
-2. **เปิดดูใน KLayout** (สำหรับ GDS inspection):
-
-   ```bash
-   make librelane-klayout
-   ```
-
-   ใน KLayout:
-   - กด `Ctrl+Shift+H` → ซ่อน/แสดง layer
-   - ตรวจสอบ **Pad Ring**: ควรเห็น pad cells รอบชิปทั้ง 4 ด้าน
-   - ตรวจสอบ **Seal Ring**: เส้นกรอบด้านนอกสุด
-   - ดู **DRC markers** (ถ้ามี): สีแดงหรือส้ม
-
-3. ตรวจสอบ Timing Report จาก file:
-
-   ```bash
-   cat run/RUN_*/reports/signoff/timing_summary.rpt | head -50
-   ```
-
-   ค่าที่ต้องการ:
-   - **WNS (Worst Negative Slack):** ≥ 0.0 ns
-   - **TNS (Total Negative Slack):** 0.0 ns
-   - **Hold Slack:** ≥ 0.0 ns
-
-4. ตรวจสอบ DRC report:
-
-   ```bash
-   cat run/RUN_*/reports/signoff/drc_summary.rpt
-   ```
-
-5. ถ้าพบ DRC violations ใน KLayout ให้ระบุ layer และ rule ที่ fail แล้วพิจารณา:
-   - ปรับ routing parameters ใน config.yaml
-   - เพิ่ม spacing constraints
-   - ปรับ `DIE_AREA` ให้ใหญ่ขึ้น
-
-   ```yaml
-   # ตัวอย่าง: เพิ่ม routing layer constraints
-   RT_MAX_LAYER: Metal5
-   ```
-
-   > 💡 **เคล็ดลับ:** KLayout DRC report จะบอก layer, rule number, และ coordinate ของ violation ให้ zoom ไปดูได้เลย
-
-6. Copy ผลลัพธ์ final ไปยัง `final/` folder:
-
-   ```bash
-   make copy-final
-   ```
-
-   > ✅ **จุดตรวจสอบ:**
-   > ```bash
-   > ls final/
-   > # ควรเห็น chip_top.gds, chip_top.lef, chip_top.v, chip_top.sdf
-   > ```
-
-### Expected Result
-
-- Layout ถูกต้อง: Pad ring ครบทุกด้าน, Core มี standard cells, Routing ไม่มี open หรือ short
-- Timing met: WNS ≥ 0
-- DRC: 0 violations (หรือ violations ที่ waive ได้ตาม foundry rules)
+นี่เป็น distinction สำคัญมากก่อนออกแบบ Full Chip
 
 ---
 
-## Lab 6: Gate-Level Simulation เพื่อ Verify Functionality
+# 3. เหตุใดจึงไม่ควรนำ Memory Bus ออก Pad โดยตรง
 
-**เวลาโดยประมาณ:** 45 นาที  
-**Objective:** รัน Gate-Level Simulation ด้วย Icarus Verilog + cocotb เพื่อตรวจสอบว่า synthesized netlist ยังทำงานถูกต้อง
+ถ้านำ interface ทั้งหมดออกสู่ package จะต้องใช้ประมาณ
 
-### พื้นหลัง
+```text
+pc_o          32 outputs
+instr_i       32 inputs
 
-**Gate-Level Simulation (GL Sim)** คือการ simulate netlist หลัง synthesis โดยใช้ standard cell models แทน RTL abstract — ช่วยตรวจสอบ:
-- Timing issues ที่ simulation แบบ RTL ไม่เจอ
-- Clock domain crossing problems
-- Power-up/reset behavior
+dmem_addr     32 outputs
+dmem_wdata    32 outputs
+dmem_we        4 outputs
+dmem_rdata    32 inputs
 
-Template ใช้ **cocotb** (Python-based testbench) กับ **Icarus Verilog** เป็น simulator
+clock          1 input
+reset          1 input
+------------------------
+Total        166 signal pads
+```
 
-### ขั้นตอน
+ยังไม่รวม
 
-1. ตรวจสอบว่า `final/` มีไฟล์ netlist แล้ว:
+```text
+VDD
+VSS
+IOVDD
+IOVSS
+```
 
-   ```bash
-   ls final/
-   # ต้องมี chip_top.v และ chip_top.sdf
-   ```
+ดังนั้น architecture นี้ไม่เหมาะกับ test chip ขนาดประมาณ 1.5 mm × 1.5 mm
 
-2. ดู testbench เดิมของ template:
+สำหรับ workshop นี้เราจะใช้
 
-   ```bash
-   cat cocotb/chip_top_tb.py | head -60
-   ```
+```text
+CPU
+ |
+ +--- internal instruction source
+ |
+ +--- internal dummy/test data memory
+ |
+ +--- PC observation output
+```
 
-3. สร้าง testbench สำหรับ osoc1_cpu ใน `cocotb/chip_top_tb.py`:
+ทำให้ signal pads ลดเหลือประมาณ
 
-   ```python
-   # chip_top_tb.py — cocotb testbench for osoc1_cpu full chip
-   import cocotb
-   from cocotb.clock import Clock
-   from cocotb.triggers import RisingEdge, FallingEdge, Timer
-   
-   @cocotb.test()
-   async def test_chip_reset(dut):
-       """Test: chip reset behavior"""
-       # Start clock (50 MHz = 20ns period)
-       cocotb.start_soon(Clock(dut.clk_pad, 20, units="ns").start())
-   
-       # Assert reset
-       dut.rst_n_pad.value = 0
-       dut.gpio_in_pad.value = 0
-       await Timer(100, units="ns")
-   
-       # Release reset
-       dut.rst_n_pad.value = 1
-       await RisingEdge(dut.clk_pad)
-       await Timer(50, units="ns")
-   
-       # Check outputs (ปรับตาม expected behavior ของ osoc1_cpu)
-       cocotb.log.info(f"gpio_out = {dut.gpio_out_pad.value}")
-       assert dut.gpio_out_pad.value.integer >= 0, "GPIO output should be valid"
-   
-   @cocotb.test()
-   async def test_basic_operation(dut):
-       """Test: basic CPU operation after reset"""
-       cocotb.start_soon(Clock(dut.clk_pad, 20, units="ns").start())
-   
-       dut.rst_n_pad.value = 0
-       await Timer(40, units="ns")
-       dut.rst_n_pad.value = 1
-   
-       # ให้ CPU run 1000 cycles
-       for _ in range(1000):
-           await RisingEdge(dut.clk_pad)
-   
-       cocotb.log.info("Basic operation test passed")
-   ```
-
-4. รัน RTL Simulation (ทดสอบกับ RTL source ก่อน):
-
-   ```bash
-   make sim
-   ```
-
-5. รัน Gate-Level Simulation:
-
-   ```bash
-   make sim-gl
-   ```
-
-   > ⚠️ **คำเตือน:** GL simulation อาจช้ากว่า RTL simulation 10–100 เท่า เพราะต้อง load standard cell models ทั้งหมด
-
-6. ดู waveform ด้วย GTKWave:
-
-   ```bash
-   make sim-view
-   ```
-
-   ใน GTKWave:
-   - เพิ่ม signal `clk_pad`, `rst_n_pad`, `gpio_in_pad`, `gpio_out_pad`
-   - ตรวจสอบว่า output เปลี่ยนแปลงตามที่คาดหวัง
-
-7. ตรวจสอบ simulation log:
-
-   ```bash
-   cat cocotb/sim_build/results.xml
-   # หรือ
-   grep -E "PASS|FAIL|ERROR" cocotb/sim_build/*.log
-   ```
-
-   > ✅ **จุดตรวจสอบ:**
-   > ```
-   > ** TEST                          STATUS  SIM TIME(ns)  REAL TIME(s)  RATIO(ns/s)
-   > ** test_chip_reset               PASSED        200.00         0.10     2000.00
-   > ** test_basic_operation          PASSED      20040.00         2.30     8713.04
-   > ```
-
-### Expected Result
-
-- RTL Simulation: PASSED
-- GL Simulation: PASSED (อาจมี timing warnings แต่ไม่ควร fail)
-- Waveform แสดงพฤติกรรม CPU ที่ถูกต้องหลัง reset
-
-### Troubleshooting
-
-| ปัญหา | วิธีแก้ไข |
-|-------|-----------|
-| GL sim ช้ามาก | ลด simulation time ใน testbench |
-| `Unknown signal` ใน testbench | ตรวจสอบ port names ของ `chip_top.sv` |
-| GL sim fail แต่ RTL pass | อาจมี timing violation — ตรวจสอบ hold/setup slack |
-| `SDF file not found` | ตรวจสอบว่า `make copy-final` ทำงานเสร็จแล้ว |
+```text
+clock       1
+reset       1
+output      8
+----------------
+           10 signal pads
+```
 
 ---
 
-## Summary & Key Takeaways
+# 4. Architecture ของ Full-Chip Baseline
 
-### สิ่งที่ได้เรียนรู้
+Baseline architecture จะเป็น
 
-- **LibreLane Chip Flow** คือ automated flow สำหรับ Full Chip tapeout ที่รวม: Synthesis → PnR → Pad Ring → Seal Ring → Filler → DRC → LVS → GL Sim
-- **IHP SG13G2** เป็น 130nm BiCMOS Open-Source PDK ที่รองรับ digital standard cell flow ผ่าน LibreLane
-- **config.yaml** ไฟล์เดียวควบคุมทุกขั้นตอนใน flow รวมถึง pad placement ทุกด้าน
-- **chip_top → chip_core → IP** เป็น hierarchy ที่แนะนำสำหรับ Full Chip design
-- **Gate-Level Simulation** จำเป็นต้องรันหลัง PnR เพื่อยืนยัน functional correctness
+```text
+                         +-----------------------+
+                         |       chip_core       |
+                         |                       |
+       clk ------------->|                       |
+       rst_n ------------>|   +---------------+   |
+                         |   | osoc1_cpu_core|   |
+                         |   +---------------+   |
+                         |       |       ^       |
+                         |       | PC    | instr |
+                         |       v       |       |
+                         |   NOP Generator       |
+                         |                       |
+                         | dmem_rdata = 0        |
+                         |                       |
+                         | output = PC[9:2]      |
+                         +----------+------------+
+                                    |
+                                    v
+                             output pads
+```
 
-### Metrics ที่ต้องผ่านก่อน Tapeout
+Instruction ทุก address เป็น
 
-| Metric | เกณฑ์ |
-|--------|-------|
-| WNS (Setup Timing Slack) | ≥ 0.0 ns |
-| Hold Slack | ≥ 0.0 ns |
-| DRC Violations | 0 |
-| LVS Status | Clean (Match) |
-| GL Simulation | PASSED |
+```text
+0x00000013
+```
+
+ซึ่งคือ
+
+```assembly
+addi x0, x0, 0
+```
+
+หรือ RISC-V `NOP`
+
+ดังนั้น CPU จะเดิน PC ทีละ 4 bytes
 
 ---
 
-## Next Steps / Further Reading
+# 5. เตรียม Working Directory
 
-- **ขั้นตอนถัดไป:** ยื่น GDSII เข้า IHP Shuttle Program ที่ https://dk.ihp-microelectronics.com/OpenSourceRequest.php
-- **เพิ่ม IP Blocks:** ดู `ip/` folder ใน template สำหรับการ integrate SRAM macros
-- **ปรับปรุง Timing:** ศึกษา OpenSTA constraints และ multi-corner STA
-- **คู่มือ LibreLane อย่างเป็นทางการ:** https://librelane.readthedocs.io/
-- **IHP OpenPDK Documentation:** https://ihp-open-pdk-docs.readthedocs.io/
-- **Tiny Tapeout (สำหรับ quick prototyping):** https://tinytapeout.com/
-
----
-
-## Appendix A: คำสั่งที่ใช้บ่อย
+Clone repository สำหรับทำงาน
 
 ```bash
-# เข้า Nix Shell
+cd ~/workshop
+
+git clone https://github.com/chumnarn/synpnr_osoc1_cpu.git
+cd synpnr_osoc1_cpu
+```
+
+ตรวจสอบ
+
+```bash
+git status
+git log --oneline -5
+```
+
+จากนั้น clone official IHP LibreLane full-chip template แยกไว้
+
+```bash
+cd ~/workshop
+
+git clone \
+  https://github.com/IHP-GmbH/ihp-sg13g2-librelane-template.git \
+  osoc1_fullchip
+```
+
+เข้า project
+
+```bash
+cd ~/workshop/osoc1_fullchip
+```
+
+โครงสร้างที่เราจะสร้างคือ
+
+```text
+osoc1_fullchip/
+├── src/
+│   ├── cpu/
+│   │   ├── cpu_sv_package.sv
+│   │   ├── alu.sv
+│   │   ├── ...
+│   │   └── osoc1_cpu_core.sv
+│   │
+│   ├── chip_core.sv
+│   └── chip_top.sv
+│
+├── librelane/
+│   ├── config.yaml
+│   ├── chip_top.sdc
+│   └── pdn_cfg.tcl
+│
+├── cocotb/
+├── ip/
+├── Makefile
+├── flake.nix
+└── shell.nix
+```
+
+---
+
+# 6. เข้า LibreLane Development Environment
+
+Official IHP template เตรียม Nix environment ไว้แล้ว
+
+รัน
+
+```bash
 nix-shell
+```
 
-# รัน full chip implementation
-make librelane
+ตรวจสอบ tool
 
-# View ใน OpenROAD
+```bash
+which librelane
+which yosys
+which openroad
+which verilator
+which klayout
+```
+
+ตรวจ version
+
+```bash
+librelane --version
+yosys -V
+openroad -version
+verilator --version
+```
+
+หากคำสั่งทั้งหมดทำงานได้ ให้ถือว่า environment พร้อม
+
+---
+
+# 7. ติดตั้ง IHP SG13G2 PDK
+
+จาก root ของ template
+
+```bash
+make clone-pdk
+```
+
+ตรวจสอบ
+
+```bash
+ls ~/.ciel
+```
+
+และ
+
+```bash
+find ~/.ciel \
+  -path '*sg13g2_stdcell*' \
+  -type d | head
+```
+
+ตรวจ IO library
+
+```bash
+find ~/.ciel \
+  -path '*sg13g2_io*' \
+  -type d | head
+```
+
+ตรวจ SRAM library
+
+```bash
+find ~/.ciel \
+  -name 'RM_IHPSG13_1P_1024x32_c2_bm_bist*'
+```
+
+---
+
+# 8. Copy CPU RTL เข้าสู่ Full-Chip Project
+
+สร้าง directory
+
+```bash
+mkdir -p src/cpu
+```
+
+copy RTL
+
+```bash
+cp ~/workshop/synpnr_osoc1_cpu/src/*.sv src/cpu/
+```
+
+ตรวจ
+
+```bash
+find src/cpu -maxdepth 1 -type f | sort
+```
+
+---
+
+# 9. ตรวจ RTL Dependency ก่อนแตะ Physical Design
+
+ห้ามเริ่ม LibreLane Full Chip ทันที
+
+ควรตรวจ RTL ก่อนเสมอ
+
+## 9.1 ตรวจ module
+
+```bash
+grep -R "^module " src/cpu
+```
+
+ตรวจ package
+
+```bash
+grep -R "^package " src/cpu
+```
+
+ควรพบ
+
+```text
+package cpu_sv_package
+module alu
+module alu_in_muxes
+...
+module osoc1_cpu_core
+```
+
+---
+
+# 10. RTL Lint ด้วย Verilator
+
+Package ต้องอ่านก่อน module ที่ import package
+
+ตัวอย่าง
+
+```bash
+verilator \
+  --lint-only \
+  --Wall \
+  --Wno-DECLFILENAME \
+  --top-module osoc1_cpu_core \
+  src/cpu/cpu_sv_package.sv \
+  src/cpu/pc_reg.sv \
+  src/cpu/pc_plus_4.sv \
+  src/cpu/decoder.sv \
+  src/cpu/ctrl.sv \
+  src/cpu/alu_in_muxes.sv \
+  src/cpu/alu.sv \
+  src/cpu/sau.sv \
+  src/cpu/lau.sv \
+  src/cpu/rf_wb_mux.sv \
+  src/cpu/reg_file.sv \
+  src/cpu/bcu.sv \
+  src/cpu/next_pc_logic.sv \
+  src/cpu/osoc1_cpu_core.sv
+```
+
+เป้าหมายคือ
+
+```text
+0 Error
+```
+
+Warning บางประเภทอาจยอมรับได้ แต่ต้องตรวจทุก warning ก่อน synthesis
+
+---
+
+# 11. สร้าง `chip_core.sv`
+
+`chip_core` ทำหน้าที่เป็น SoC wrapper ระหว่าง CPU กับ Full-Chip I/O system
+
+สร้าง
+
+```bash
+nano src/chip_core.sv
+```
+
+ใช้ baseline ดังนี้
+
+```systemverilog
+`default_nettype none
+
+module chip_core #(
+    parameter integer NUM_INPUT_PADS  = 2,
+    parameter integer NUM_OUTPUT_PADS = 8,
+    parameter integer NUM_BIDIR_PADS  = 0,
+    parameter integer NUM_ANALOG_PADS = 0
+)(
+    input  wire clk,
+    input  wire rst_n,
+
+    input  wire [NUM_INPUT_PADS-1:0]   input_in,
+    output wire [NUM_OUTPUT_PADS-1:0]  output_out,
+
+    input  wire [NUM_BIDIR_PADS-1:0]   bidir_in,
+    output wire [NUM_BIDIR_PADS-1:0]   bidir_out,
+    output wire [NUM_BIDIR_PADS-1:0]   bidir_oe,
+
+    inout wire [NUM_ANALOG_PADS-1:0]   analog
+);
+
+    wire [31:0] pc;
+    wire [31:0] instr;
+
+    wire [3:0]  dmem_we;
+    wire [31:0] dmem_addr;
+    wire [31:0] dmem_wdata;
+    wire [31:0] dmem_rdata;
+
+    /*
+     * Baseline instruction source.
+     *
+     * 0x00000013 = ADDI x0, x0, 0 = RISC-V NOP
+     */
+    assign instr = 32'h0000_0013;
+
+    /*
+     * Baseline data memory response.
+     *
+     * CPU benchmark program contains only NOP,
+     * therefore no data-memory access is required.
+     */
+    assign dmem_rdata = 32'h0000_0000;
+
+    osoc1_cpu_core u_cpu (
+        .clk_i        (clk),
+        .rst_ni       (rst_n),
+
+        .pc_o         (pc),
+        .instr_i      (instr),
+
+        .dmem_we_o    (dmem_we),
+        .dmem_addr_o  (dmem_addr),
+        .dmem_wdata_o (dmem_wdata),
+        .dmem_rdata_i (dmem_rdata)
+    );
+
+    /*
+     * Make CPU execution externally observable.
+     *
+     * PC increments by four, therefore PC[1:0]
+     * are normally zero. Export PC[9:2].
+     */
+    assign output_out = pc[9:2];
+
+    /*
+     * Unused generic template interfaces.
+     */
+    assign bidir_out = '0;
+    assign bidir_oe  = '0;
+
+endmodule
+
+`default_nettype wire
+```
+
+---
+
+# 12. เหตุผลที่ใช้ `PC[9:2]`
+
+หาก CPU ทำงานถูกต้อง
+
+```text
+PC[9:2]
+```
+
+จะมีลักษณะเหมือน binary counter
+
+ตัวอย่าง
+
+```text
+PC            PC[9:2]
+--------------------------------
+0x00000000    00000000
+0x00000004    00000001
+0x00000008    00000010
+0x0000000C    00000011
+0x00000010    00000100
+```
+
+ดังนั้นหลัง fabrication สามารถต่อ logic analyzer เข้ากับ output pads แล้วตรวจการทำงานของ
+
+- clock input
+- reset input
+- PC register
+- next-PC logic
+- control/datapath ขั้นพื้นฐาน
+
+ได้โดยไม่ต้องมี UART
+
+---
+
+# 13. ตรวจ Wrapper ก่อน Full Chip
+
+รัน lint โดยเพิ่ม `chip_core`
+
+```bash
+verilator \
+  --lint-only \
+  --Wall \
+  --Wno-DECLFILENAME \
+  --top-module chip_core \
+  src/cpu/cpu_sv_package.sv \
+  src/cpu/pc_reg.sv \
+  src/cpu/pc_plus_4.sv \
+  src/cpu/decoder.sv \
+  src/cpu/ctrl.sv \
+  src/cpu/alu_in_muxes.sv \
+  src/cpu/alu.sv \
+  src/cpu/sau.sv \
+  src/cpu/lau.sv \
+  src/cpu/rf_wb_mux.sv \
+  src/cpu/reg_file.sv \
+  src/cpu/bcu.sv \
+  src/cpu/next_pc_logic.sv \
+  src/cpu/osoc1_cpu_core.sv \
+  src/chip_core.sv
+```
+
+ถ้าเจอ
+
+```text
+MULTITOP
+```
+
+ไม่ใช่ synthesis error โดยตรง แต่ควรระบุ
+
+```bash
+--top-module chip_core
+```
+
+---
+
+# 14. ใช้ `chip_top.sv` จาก Official IHP Template
+
+ไม่ควรเขียน IO pads เองตั้งแต่ศูนย์
+
+Official template มีการ instantiate cell ที่ถูกต้อง เช่น
+
+```text
+sg13g2_IOPadIOVdd
+sg13g2_IOPadIOVss
+sg13g2_IOPadVdd
+sg13g2_IOPadVss
+sg13g2_IOPadIn
+sg13g2_IOPadOut30mA
+sg13g2_IOPadInOut30mA
+sg13g2_IOPadAnalog
+```
+
+ดังนั้นให้ใช้ `chip_top.sv` เดิมจาก official template แล้วปรับ parameter
+
+สำหรับ baseline CPU test chip ใช้
+
+```systemverilog
+parameter NUM_VDD_PADS    = 2;
+parameter NUM_VSS_PADS    = 2;
+
+parameter NUM_IOVDD_PADS  = 2;
+parameter NUM_IOVSS_PADS  = 2;
+
+parameter NUM_INPUT_PADS  = 2;
+parameter NUM_OUTPUT_PADS = 8;
+
+parameter NUM_BIDIR_PADS  = 0;
+parameter NUM_ANALOG_PADS = 0;
+```
+
+หมายเหตุ:
+
+`clk_PAD` และ `rst_n_PAD` เป็น dedicated pads อยู่แล้ว จึงไม่รวมใน `NUM_INPUT_PADS`
+
+input pads เพิ่มอีก 2 ขาสามารถใช้ในอนาคตเป็น
+
+```text
+input_PAD[0] = test_mode
+input_PAD[1] = boot_sel
+```
+
+---
+
+# 15. Full-Chip I/O Architecture
+
+IHP Pad Ring จะมี
+
+```text
+Core power:
+  2 × VDD
+  2 × VSS
+
+I/O power:
+  2 × IOVDD
+  2 × IOVSS
+
+Signals:
+  1 × clock
+  1 × reset
+  2 × generic input
+  8 × output
+```
+
+รวมประมาณ
+
+```text
+20 pads
+```
+
+ซึ่งเหมาะกว่าการนำ memory bus 166 สัญญาณออกโดยตรงมาก
+
+---
+
+# 16. Synthesis Source Order
+
+เนื่องจาก RTL ใช้ SystemVerilog package ควรใช้ Slang frontend
+
+ใน
+
+```text
+librelane/config.yaml
+```
+
+กำหนด
+
+```yaml
+USE_SLANG: true
+```
+
+และเรียง source file ให้ package มาก่อน
+
+```yaml
+VERILOG_FILES:
+  - dir::../src/cpu/cpu_sv_package.sv
+
+  - dir::../src/cpu/pc_reg.sv
+  - dir::../src/cpu/pc_plus_4.sv
+
+  - dir::../src/cpu/decoder.sv
+  - dir::../src/cpu/ctrl.sv
+
+  - dir::../src/cpu/alu_in_muxes.sv
+  - dir::../src/cpu/alu.sv
+
+  - dir::../src/cpu/sau.sv
+  - dir::../src/cpu/lau.sv
+
+  - dir::../src/cpu/rf_wb_mux.sv
+  - dir::../src/cpu/reg_file.sv
+
+  - dir::../src/cpu/bcu.sv
+  - dir::../src/cpu/next_pc_logic.sv
+
+  - dir::../src/cpu/osoc1_cpu_core.sv
+
+  - dir::../src/chip_core.sv
+  - dir::../src/chip_top.sv
+```
+
+ไม่ควรใส่ทั้ง
+
+```text
+rf_wb_mux.sv
+```
+
+และ
+
+```text
+rf_wb_mux.flat.v
+```
+
+พร้อมกัน หากทั้งสองประกาศ module ชื่อเดียวกัน
+
+เพราะจะเกิด
+
+```text
+module redefinition
+```
+
+---
+
+# 17. สร้าง SDC Constraint
+
+สร้าง
+
+```text
+librelane/chip_top.sdc
+```
+
+ใช้ baseline 50 MHz
+
+```tcl
+# ============================================================
+# Clock
+# ============================================================
+
+create_clock \
+    -name core_clk \
+    -period 20.000 \
+    [get_ports clk_PAD]
+
+# ============================================================
+# Clock uncertainty
+# ============================================================
+
+set_clock_uncertainty 0.25 [get_clocks core_clk]
+
+# ============================================================
+# Input timing
+# ============================================================
+
+set_input_delay 2.0 \
+    -clock core_clk \
+    [get_ports {input_PAD[*]}]
+
+# ============================================================
+# Output timing
+# ============================================================
+
+set_output_delay 4.0 \
+    -clock core_clk \
+    [get_ports {output_PAD[*]}]
+
+# ============================================================
+# Transition
+# ============================================================
+
+set_input_transition 0.15 \
+    [get_ports {input_PAD[*]}]
+
+# ============================================================
+# Output load
+# ============================================================
+
+set_load 0.033442 \
+    [get_ports {output_PAD[*]}]
+
+# Reset is asynchronous/non-timing critical
+set_false_path \
+    -from [get_ports rst_n_PAD]
+```
+
+---
+
+# 18. Clock Port กับ Clock Net ต้องไม่สับสน
+
+ใน Full Chip มี clock สองระดับ
+
+```text
+clk_PAD
+   |
+   v
+sg13g2_IOPadIn
+   |
+   +---- p2c
+          |
+          v
+       CPU clock
+```
+
+ดังนั้น configuration ควรเป็นลักษณะ
+
+```yaml
+CLOCK_PORT: clk_PAD
+CLOCK_NET: clk_pad/p2c
+CLOCK_PERIOD: 20
+```
+
+ไม่ควรใช้ internal CPU net เป็น `CLOCK_PORT`
+
+เพราะ `CLOCK_PORT` หมายถึง top-level chip input port
+
+---
+
+# 19. สร้าง `config.yaml`
+
+เริ่มจาก official IHP configuration แล้วแก้เฉพาะส่วนที่จำเป็น
+
+โครงสร้างเริ่มต้น
+
+```yaml
+meta:
+  version: 3
+  flow: Chip
+
+DESIGN_NAME: chip_top
+```
+
+ตามด้วย RTL
+
+```yaml
+VERILOG_FILES:
+  - dir::../src/cpu/cpu_sv_package.sv
+  - dir::../src/cpu/pc_reg.sv
+  - dir::../src/cpu/pc_plus_4.sv
+  - dir::../src/cpu/decoder.sv
+  - dir::../src/cpu/ctrl.sv
+  - dir::../src/cpu/alu_in_muxes.sv
+  - dir::../src/cpu/alu.sv
+  - dir::../src/cpu/sau.sv
+  - dir::../src/cpu/lau.sv
+  - dir::../src/cpu/rf_wb_mux.sv
+  - dir::../src/cpu/reg_file.sv
+  - dir::../src/cpu/bcu.sv
+  - dir::../src/cpu/next_pc_logic.sv
+  - dir::../src/cpu/osoc1_cpu_core.sv
+  - dir::../src/chip_core.sv
+  - dir::../src/chip_top.sv
+```
+
+เปิด SystemVerilog frontend
+
+```yaml
+USE_SLANG: true
+```
+
+ถ้าต้องการรักษา hierarchy
+
+```yaml
+SLANG_ARGUMENTS:
+  - --keep-hierarchy
+```
+
+---
+
+# 20. Power/Ground Configuration
+
+กำหนด
+
+```yaml
+VDD_NETS:
+  - VDD
+
+GND_NETS:
+  - VSS
+```
+
+อย่าใช้ syntax เก่า
+
+```yaml
+VDD_NET: VDD
+VSS_NET: VSS
+```
+
+หาก LibreLane version ปัจจุบันคาดหวัง list form
+
+---
+
+# 21. Floorplan Baseline
+
+เริ่มจาก die
+
+```yaml
+FP_SIZING: absolute
+
+DIE_AREA:
+  - 0
+  - 0
+  - 1600
+  - 1600
+
+CORE_AREA:
+  - 365
+  - 365
+  - 1235
+  - 1235
+```
+
+มีพื้นที่ core
+
+```text
+870 µm × 870 µm
+```
+
+หรือประมาณ
+
+```text
+0.7569 mm²
+```
+
+ขนาดนี้เหมาะสำหรับ iteration แรกของ CPU core ขนาดเล็ก
+
+---
+
+# 22. Placement Density
+
+LibreLane v3-style configuration ใช้
+
+```yaml
+PL_TARGET_DENSITY_PCT: 30
+```
+
+แนะนำเริ่ม
+
+```text
+25–35 %
+```
+
+สำหรับ CPU
+
+เพราะ datapath 32-bit มี routing จำนวนมาก
+
+หาก density สูงเกินไป
+
+```text
+45–60 %
+```
+
+อาจทำให้
+
+```text
+Global Routing congestion
+Detailed Routing failure
+Hold fixing difficulty
+Antenna repair difficulty
+```
+
+---
+
+# 23. Pad Placement
+
+สำหรับ baseline ใช้ layout แบบสมดุล
+
+```text
+              NORTH
+    +-------------------------+
+    | OUT7 OUT6 OUT5 OUT4     |
+    | VDD VSS                 |
+    |                         |
+WEST|                         |EAST
+    |                         |
+    |                         |
+    |                         |
+    | IN0 IN1                 |
+    | IOVDD IOVSS             |
+    +-------------------------+
+             SOUTH
+```
+
+ตัวอย่าง
+
+```yaml
+PAD_SOUTH:
+  - clk_pad
+  - rst_n_pad
+  - "inputs\\[0\\].input_pad"
+  - "inputs\\[1\\].input_pad"
+  - "iovdd_pads\\[0\\].iovdd_pad"
+  - "iovss_pads\\[0\\].iovss_pad"
+
+PAD_EAST:
+  - "outputs\\[0\\].output_pad"
+  - "outputs\\[1\\].output_pad"
+  - "outputs\\[2\\].output_pad"
+  - "outputs\\[3\\].output_pad"
+  - "vdd_pads\\[0\\].vdd_pad"
+  - "vss_pads\\[0\\].vss_pad"
+
+PAD_NORTH:
+  - "outputs\\[7\\].output_pad"
+  - "outputs\\[6\\].output_pad"
+  - "outputs\\[5\\].output_pad"
+  - "outputs\\[4\\].output_pad"
+  - "iovdd_pads\\[1\\].iovdd_pad"
+  - "iovss_pads\\[1\\].iovss_pad"
+
+PAD_WEST:
+  - "vdd_pads\\[1\\].vdd_pad"
+  - "vss_pads\\[1\\].vss_pad"
+```
+
+จุดสำคัญ:
+
+`PAD_SOUTH`, `PAD_EAST`, `PAD_NORTH`, `PAD_WEST`
+
+ต้องอ้าง **instance hierarchy ใน `chip_top.sv`**
+
+ไม่ใช่ชื่อ top-level port
+
+---
+
+# 24. Bond Pad
+
+Official IHP template มี external bondpad
+
+ตัวอย่าง
+
+```yaml
+PAD_BONDPAD_NAME: bondpad_70x70_novias
+```
+
+และ
+
+```yaml
+EXTRA_GDS:
+  - dir::../ip/bondpad_70x70_novias/gds/bondpad_70x70_novias.gds
+
+EXTRA_LEFS:
+  - dir::../ip/bondpad_70x70_novias/lef/bondpad_70x70_novias.lef
+```
+
+ตรวจไฟล์ก่อน run
+
+```bash
+ls -lh \
+  ip/bondpad_70x70_novias/gds/bondpad_70x70_novias.gds
+
+ls -lh \
+  ip/bondpad_70x70_novias/lef/bondpad_70x70_novias.lef
+```
+
+หาก GDS/LEF ไม่พบ ห้ามเริ่ม full flow
+
+---
+
+# 25. SDC Configuration
+
+ใส่
+
+```yaml
+PNR_SDC_FILE: dir::chip_top.sdc
+SIGNOFF_SDC_FILE: dir::chip_top.sdc
+FALLBACK_SDC: dir::chip_top.sdc
+```
+
+และ
+
+```yaml
+CLOCK_PORT: clk_PAD
+CLOCK_NET: clk_pad/p2c
+CLOCK_PERIOD: 20
+```
+
+---
+
+# 26. Power Distribution Network
+
+เปิด core ring
+
+```yaml
+PDN_CORE_RING: true
+```
+
+เชื่อม ring กับ pads
+
+```yaml
+PDN_CORE_RING_CONNECT_TO_PADS: true
+```
+
+baseline width
+
+```yaml
+PDN_CORE_RING_VWIDTH: 15
+PDN_CORE_RING_HWIDTH: 15
+```
+
+spacing
+
+```yaml
+PDN_CORE_RING_VSPACING: 5
+PDN_CORE_RING_HSPACING: 5
+```
+
+และ
+
+```yaml
+PDN_ENABLE_PINS: false
+```
+
+---
+
+# 27. Routing
+
+เริ่มจาก
+
+```yaml
+GRT_ALLOW_CONGESTION: true
+```
+
+เฉพาะ bring-up
+
+ไม่ได้หมายความว่ายอมรับ congestion ใน final design
+
+หลังจาก flow ทำงานแล้วควรกลับมาเปลี่ยนเป็น
+
+```yaml
+GRT_ALLOW_CONGESTION: false
+```
+
+และแก้ floorplan ให้ routing clean จริง
+
+---
+
+# 28. Preflight ก่อน LibreLane
+
+ก่อน run flow ทุกครั้งให้ตรวจตามลำดับ
+
+## 28.1 RTL files
+
+```bash
+find src -type f \
+  \( -name '*.sv' -o -name '*.v' \) \
+  | sort
+```
+
+## 28.2 Top modules
+
+```bash
+grep -R "^module chip_top" src
+grep -R "^module chip_core" src
+grep -R "^module osoc1_cpu_core" src
+```
+
+## 28.3 Package
+
+```bash
+grep -R "^package cpu_sv_package" src
+```
+
+## 28.4 YAML
+
+```bash
+python3 - <<'PY'
+import yaml
+
+with open("librelane/config.yaml") as f:
+    yaml.safe_load(f)
+
+print("PASS: YAML syntax OK")
+PY
+```
+
+## 28.5 SDC
+
+```bash
+test -f librelane/chip_top.sdc &&
+echo "PASS: SDC exists"
+```
+
+## 28.6 Bond pad
+
+```bash
+test -f \
+ip/bondpad_70x70_novias/gds/bondpad_70x70_novias.gds \
+&& echo "PASS: bondpad GDS exists"
+```
+
+---
+
+# 29. Stage 1 — รันเฉพาะ Synthesis
+
+ไม่ควรรัน GDS เต็มทันที
+
+เริ่มจาก
+
+```bash
+librelane \
+  --pdk ihp-sg13g2 \
+  --flow Chip \
+  --run-tag osoc1_synth01 \
+  --to Yosys.Synthesis \
+  librelane/config.yaml
+```
+
+เป้าหมายคือ
+
+```text
+Yosys.Synthesis
+        |
+        +-- SUCCESS
+```
+
+---
+
+# 30. ตรวจ Synthesis Log
+
+ค้นหา error
+
+```bash
+grep -Rni \
+  -E 'error|failed|unmapped|not found' \
+  runs/osoc1_synth01
+```
+
+ตรวจ warning
+
+```bash
+grep -Rni \
+  -E 'warning' \
+  runs/osoc1_synth01 | head -100
+```
+
+---
+
+# 31. ตรวจ Unmapped Cells
+
+หลัง synthesis ต้องไม่มี logical cell ที่ map ไม่ได้
+
+ค้นหา
+
+```bash
+grep -Rni \
+  "unmapped" \
+  runs/osoc1_synth01
+```
+
+หากพบ
+
+```text
+1 Unmapped Yosys instances found
+```
+
+ให้ตรวจ module
+
+```bash
+grep -R "^module " src/cpu src
+```
+
+และดู instantiated modules
+
+```bash
+grep -Rni \
+  -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]+[A-Za-z_]' \
+  src/cpu
+```
+
+---
+
+# 32. ตรวจ Synthesis Statistics
+
+สิ่งที่ควรบันทึกลง Lab report
+
+```text
+Number of cells
+Number of sequential cells
+Number of combinational cells
+Chip area
+Flip-flop count
+Buffer count
+Inverter count
+Estimated timing
+```
+
+ใช้ข้อมูลนี้เป็น baseline สำหรับ PPA comparison
+
+---
+
+# 33. Stage 2 — Floorplan
+
+เมื่อ synthesis clean แล้วจึง run ต่อถึง floorplan
+
+```bash
+librelane \
+  --pdk ihp-sg13g2 \
+  --flow Chip \
+  --run-tag osoc1_fp01 \
+  --to OpenROAD.Floorplan \
+  librelane/config.yaml
+```
+
+ตรวจ
+
+```text
+Die
+Core
+Rows
+Tracks
+Power domains
+```
+
+---
+
+# 34. Floorplan Quality Check
+
+หลัง Floorplan ให้ถาม 5 คำถาม
+
+### 1. Core ใหญ่พอหรือไม่
+
+```text
+standard-cell area / core area
+```
+
+ไม่ควรสูงเกินไป
+
+### 2. Pad ring มีพื้นที่พอหรือไม่
+
+core ต้องไม่ชน IO pads
+
+### 3. PDN ring มีพื้นที่พอหรือไม่
+
+ต้องเหลือ channel ระหว่าง
+
+```text
+pad ring
+core PDN
+placement region
+```
+
+### 4. Clock pad อยู่ในตำแหน่งเหมาะสมหรือไม่
+
+ควรหลีกเลี่ยง path จาก pad ถึง clock root ที่ยาวโดยไม่จำเป็น
+
+### 5. Output pads กระจายตัวเหมาะสมหรือไม่
+
+ควรแบ่ง bus ให้อยู่ติดกันเพื่อง่ายต่อ package routing
+
+---
+
+# 35. Stage 3 — Global Placement
+
+รันต่อ
+
+```bash
+librelane \
+  --pdk ihp-sg13g2 \
+  --flow Chip \
+  --run-tag osoc1_place01 \
+  --to OpenROAD.GlobalPlacement \
+  librelane/config.yaml
+```
+
+ตรวจ
+
+```text
+utilization
+overflow
+wirelength
+congestion
+timing
+```
+
+---
+
+# 36. แก้ Placement Congestion
+
+ถ้าพบ congestion
+
+วิธีที่ควรลองตามลำดับคือ
+
+```text
+1. ลด placement density
+2. ขยาย core
+3. ขยาย die
+4. ปรับ macro/pad placement
+5. ปรับ synthesis strategy
+```
+
+ตัวอย่าง
+
+```yaml
+PL_TARGET_DENSITY_PCT: 25
+```
+
+แทน
+
+```yaml
+PL_TARGET_DENSITY_PCT: 35
+```
+
+---
+
+# 37. Stage 4 — Clock Tree Synthesis
+
+Clock flow คือ
+
+```text
+clk_PAD
+   |
+IHP input pad
+   |
+p2c
+   |
+CTS root
+   |
+buffers
+   |
+CPU registers
+```
+
+รัน full flow ต่อจน CTS หรือใช้ run control ตาม LibreLane version ที่ติดตั้ง
+
+หลัง CTS ตรวจ
+
+```text
+clock latency
+clock skew
+setup slack
+hold slack
+buffer count
+```
+
+---
+
+# 38. วิเคราะห์ Setup Timing
+
+หลักการ
+
+```text
+Setup Slack =
+Required Time - Arrival Time
+```
+
+ต้องการ
+
+```text
+WNS >= 0
+TNS = 0
+```
+
+ถ้า setup fail
+
+ตัวอย่าง
+
+```text
+WNS = -2.1 ns
+```
+
+ให้แก้จาก
+
+```text
+20 ns
+```
+
+เป็น
+
+```text
+25 ns
+```
+
+ก่อนใน baseline
+
+```yaml
+CLOCK_PERIOD: 25
+```
+
+เท่ากับ
+
+```text
+40 MHz
+```
+
+---
+
+# 39. วิเคราะห์ Hold Timing
+
+Hold violation ไม่ควรแก้โดยเพิ่ม clock period
+
+เพราะ hold เป็น local timing problem
+
+LibreLane/OpenROAD จะพยายาม insert delay buffers
+
+ถ้าพบ
+
+```text
+unresolved hold violations
+```
+
+ให้ตรวจ
+
+```text
+clock skew
+placement congestion
+hold buffer count
+short data paths
+CTS quality
+```
+
+---
+
+# 40. Stage 5 — Global Routing
+
+เป้าหมายคือพิสูจน์ว่า topology route ได้
+
+ตรวจ
+
+```text
+routing congestion
+overflow
+unrouted nets
+antenna estimation
+via usage
+```
+
+หากพบ
+
+```text
+routing overflow
+```
+
+อย่าแก้ด้วย
+
+```yaml
+GRT_ALLOW_CONGESTION: true
+```
+
+เพียงอย่างเดียว
+
+ต้องกลับไปแก้ placement/floorplan ด้วย
+
+---
+
+# 41. Stage 6 — Detailed Routing
+
+Detailed router ต้องสร้าง geometry จริงบน metal layers
+
+หลังจบควรมี
+
+```text
+0 unrouted nets
+0 shorts
+0 routing errors
+```
+
+หาก detailed route fail ทั้งที่ global route ผ่าน มักเกี่ยวข้องกับ
+
+```text
+local congestion
+pin access
+PDN obstruction
+pad access
+cell density
+```
+
+---
+
+# 42. Antenna Check
+
+Antenna violation เกิดจาก conductor ยาวสะสม charge ระหว่าง fabrication
+
+flow อาจแก้โดย
+
+```text
+antenna diode
+route modification
+layer hopping
+```
+
+final design ต้องตรวจ report
+
+```text
+antenna violations = 0
+```
+
+---
+
+# 43. Signoff STA
+
+หลัง routing timing จะเปลี่ยนจาก pre-route เพราะมี
+
+```text
+real routed wire capacitance
+real resistance
+clock-tree parasitics
+buffer insertion
+```
+
+ดังนั้นห้ามสรุป timing จาก synthesis เพียงอย่างเดียว
+
+ต้องตรวจ post-route STA
+
+ต้องการอย่างน้อย
+
+```text
+Setup WNS >= 0
+Setup TNS = 0
+
+Hold WNS >= 0
+Hold TNS = 0
+```
+
+---
+
+# 44. DRC
+
+Design Rule Check ตรวจ physical layout rules เช่น
+
+```text
+minimum width
+minimum spacing
+via enclosure
+metal density
+notch
+overlap
+extension
+```
+
+Final target คือ
+
+```text
+DRC = 0
+```
+
+หาก workshop flow จำเป็นต้อง skip DRC บาง engine ระหว่าง debug ต้องระบุชัดว่า
+
+> flow completion ไม่เท่ากับ tapeout clean
+
+---
+
+# 45. LVS
+
+Layout Versus Schematic ตรวจว่า
+
+```text
+Physical Layout
+       ==
+Extracted Circuit
+       ==
+Logical Netlist
+```
+
+LVS mismatch ใน full chip มักเกิดจาก
+
+```text
+power pad connectivity
+IO power domain
+bondpad
+VDD/VSS naming
+macro power pins
+hierarchy flattening
+```
+
+ต้องการ
+
+```text
+LVS clean
+```
+
+---
+
+# 46. ตรวจ Layout ด้วย OpenROAD GUI
+
+หลัง flow ถึง placement/routing สามารถเปิด OpenROAD
+
+```bash
 make librelane-openroad
+```
 
-# View ใน KLayout
+ตรวจทีละ layer
+
+```text
+1. Die boundary
+2. Pad ring
+3. Core ring
+4. Placement
+5. Clock tree
+6. Global routing
+7. Detailed routing
+8. PDN
+```
+
+---
+
+# 47. ตรวจ GDS ด้วย KLayout
+
+เปิด
+
+```bash
 make librelane-klayout
+```
 
-# Copy ไฟล์ไป final/
+ตรวจ
+
+```text
+bondpads
+IO cells
+power pads
+core boundary
+metal routing
+seal ring
+fill
+```
+
+ควร zoom ตรวจ corner ทั้งสี่ด้านเป็นพิเศษ
+
+เพราะ corner ของ pad ring เป็นตำแหน่งที่พบ geometry/spacing issue ได้ง่าย
+
+---
+
+# 48. Run Full Flow
+
+เมื่อ checkpoint ก่อนหน้าผ่านแล้วจึงรันเต็ม
+
+```bash
+make librelane
+```
+
+หรือ
+
+```bash
+librelane \
+  --pdk ihp-sg13g2 \
+  --flow Chip \
+  --run-tag osoc1_fullchip01 \
+  librelane/config.yaml
+```
+
+บันทึก log
+
+```bash
+librelane \
+  --pdk ihp-sg13g2 \
+  --flow Chip \
+  --run-tag osoc1_fullchip01 \
+  librelane/config.yaml \
+  2>&1 | tee osoc1_fullchip01.log
+```
+
+---
+
+# 49. Final Artifacts
+
+เมื่อ flow ผ่าน ควรเก็บอย่างน้อย
+
+```text
+GDSII
+DEF
+LEF
+gate-level Verilog
+SDF
+timing reports
+DRC reports
+LVS reports
+antenna reports
+metrics
+configuration snapshot
+```
+
+จาก official template สามารถใช้
+
+```bash
 make copy-final
+```
 
-# RTL Simulation
+---
+
+# 50. Gate-Level Simulation
+
+ขั้นถัดไปหลัง implementation คือ
+
+```text
+RTL simulation
+        vs
+gate-level simulation
+```
+
+Official template รองรับ
+
+```bash
 make sim
+```
 
-# Gate-Level Simulation
+สำหรับ RTL และ
+
+```bash
 make sim-gl
+```
 
-# ดู Waveform
-make sim-view
+สำหรับ Gate-Level
 
-# รัน LibreLane โดยตรง (bypass Makefile)
-librelane --pdk ihp-sg13g2 librelane/config.yaml
+หลัง GL simulation ต้องตรวจว่า
 
-# Resume flow จาก step ที่ค้างไว้
-librelane --pdk ihp-sg13g2 librelane/config.yaml --last-run
+```text
+reset
+PC sequence
+output pads
+```
 
-# ดู design ใน KLayout จาก last run
-librelane --pdk ihp-sg13g2 librelane/config.yaml --last-run --flow OpenInKLayout
+ยังให้ผลเหมือน RTL
+
+---
+
+# 51. Functional Success Criteria
+
+Test chip baseline นี้ถือว่าทำงานถูกต้องเมื่อ
+
+หลัง reset
+
+```text
+PC = 0
+```
+
+และแต่ละ rising edge
+
+```text
+PC <= PC + 4
+```
+
+ดังนั้น
+
+```text
+output_PAD
+```
+
+ต้องเพิ่มแบบ binary counter
+
+ตัวอย่าง
+
+```text
+cycle  output
+----------------
+0      00
+1      01
+2      02
+3      03
+4      04
+...
 ```
 
 ---
 
-## Appendix B: Structure ของ `run/` Directory
+# 52. Recommended Lab Structure
 
+เพื่อใช้เป็น workshop แนะนำแบ่งออกเป็น 10 Labs
+
+## Lab 1 — Explore `synpnr_osoc1_cpu`
+
+เรียนรู้
+
+```text
+RTL hierarchy
+CPU interface
+instruction interface
+data interface
 ```
-run/RUN_YYYYMMDD_HHMMSS/
-├── config.json              # Resolved configuration
-├── final_summary.json       # Summary ของ flow (pass/fail ทุก step)
-├── reports/
-│   ├── synthesis/           # Yosys synthesis reports
-│   ├── placement/           # Placement reports
-│   ├── routing/             # Routing reports
-│   └── signoff/             # Timing, DRC, LVS reports
-├── results/
-│   ├── synthesis/
-│   │   └── chip_top.nl.v    # Synthesized netlist
-│   ├── final/
-│   │   ├── chip_top.gds     # Final GDSII
-│   │   ├── chip_top.lef     # LEF file
-│   │   ├── chip_top.v       # Gate-level netlist
-│   │   └── chip_top.sdf     # Standard Delay File
-│   └── klayout/
-│       └── drc_results.xml  # KLayout DRC output
-└── logs/
-    ├── synthesis.log
-    ├── floorplan.log
-    └── ...
+
+Deliverable:
+
+```text
+CPU architecture diagram
+module hierarchy
 ```
 
 ---
 
-## Appendix C: Glossary
+## Lab 2 — RTL Lint and Synthesis Readiness
 
-| คำศัพท์ | ความหมาย |
-|---------|----------|
-| RTL | Register Transfer Level — ระดับ abstraction ของ hardware design |
-| PDK | Process Design Kit — ชุดไฟล์ที่ foundry ให้มาสำหรับออกแบบชิป |
-| GDS / GDSII | Graphic Design System — รูปแบบไฟล์ layout ที่ส่ง foundry |
-| PnR | Place and Route — การจัดวาง cell และเดินสายบนชิป |
-| DRC | Design Rule Check — ตรวจสอบว่า layout ตรงตาม foundry rules |
-| LVS | Layout vs Schematic — ตรวจสอบว่า layout ตรงกับ netlist |
-| STA | Static Timing Analysis — วิเคราะห์ timing paths โดยไม่ simulate |
-| WNS | Worst Negative Slack — ค่า slack ที่แย่ที่สุดใน design |
-| CTS | Clock Tree Synthesis — สร้าง clock distribution network |
-| IO Pad | Input/Output pad cell ที่อยู่รอบชิปสำหรับ wire bonding |
-| Seal Ring | โครงสร้างป้องกันรอบชิปก่อนตัด wafer |
-| GL Sim | Gate-Level Simulation — simulation ด้วย synthesized netlist |
-| cocotb | Python-based hardware verification framework |
+ทำ
+
+```text
+Verilator lint
+package ordering
+module dependency
+```
+
+Deliverable:
+
+```text
+lint-clean CPU
+```
 
 ---
 
-*เอกสารนี้จัดทำสำหรับ Full Chip Implementation Workshop — IHP SG13G2 + LibreLane*  
-*อ้างอิง: [IHP OpenPDK Docs](https://ihp-open-pdk-docs.readthedocs.io) | [LibreLane Docs](https://librelane.readthedocs.io) | [IHP-GmbH/ihp-sg13g2-librelane-template](https://github.com/IHP-GmbH/ihp-sg13g2-librelane-template)*
+## Lab 3 — Core-Only Synthesis
+
+ใช้
+
+```text
+DESIGN_NAME = osoc1_cpu_core
+```
+
+เป้าหมาย
+
+```text
+technology mapping
+cell count
+area
+timing
+```
+
+Deliverable:
+
+```text
+CPU synthesis baseline
+```
+
+---
+
+## Lab 4 — Build Full-Chip Wrapper
+
+สร้าง
+
+```text
+chip_core
+chip_top
+```
+
+และ NOP generator
+
+Deliverable:
+
+```text
+observable CPU test chip
+```
+
+---
+
+## Lab 5 — IHP SG13G2 Pad Ring
+
+ศึกษา
+
+```text
+IOPadIn
+IOPadOut
+VDD
+VSS
+IOVDD
+IOVSS
+```
+
+Deliverable:
+
+```text
+20-pad floorplan
+```
+
+---
+
+## Lab 6 — Floorplan and PDN
+
+ศึกษา
+
+```text
+die/core area
+power ring
+pad-to-core power connection
+```
+
+Deliverable:
+
+```text
+PDN-complete floorplan
+```
+
+---
+
+## Lab 7 — Placement and CTS
+
+วิเคราะห์
+
+```text
+placement density
+clock skew
+setup timing
+hold timing
+```
+
+Deliverable:
+
+```text
+post-CTS timing report
+```
+
+---
+
+## Lab 8 — Routing
+
+ศึกษา
+
+```text
+global routing
+detailed routing
+congestion
+antenna
+```
+
+Deliverable:
+
+```text
+routed DEF
+```
+
+---
+
+## Lab 9 — Signoff
+
+ตรวจ
+
+```text
+STA
+DRC
+LVS
+antenna
+```
+
+Deliverable:
+
+```text
+signoff checklist
+```
+
+---
+
+## Lab 10 — GDS and Gate-Level Verification
+
+ทำ
+
+```text
+GDS inspection
+GL simulation
+SDF simulation
+```
+
+Deliverable:
+
+```text
+final chip_top.gds
+final chip_top.v
+final reports
+```
+
+---
+
+# 53. ขั้นต่อยอด: Full SoC Version
+
+หลัง baseline ผ่านแล้วจึงเปลี่ยน architecture เป็น
+
+```text
+             +----------------------+
+             |       CPU Core       |
+             +----------+-----------+
+                        |
+           +------------+------------+
+           |                         |
+           v                         v
+     Instruction SRAM           Data SRAM
+        1024 × 32                1024 × 32
+           |                         |
+           +------------+------------+
+                        |
+                     MMIO
+                        |
+        +---------------+---------------+
+        |               |               |
+      GPIO             UART            Timer
+```
+
+นี่จะเปลี่ยน project จาก
+
+```text
+CPU test chip
+```
+
+เป็น
+
+```text
+small RISC-V SoC
+```
+
+---
+
+# 54. IHP SRAM Macro Extension
+
+IHP SG13G2 LibreLane template ปัจจุบันมีตัวอย่าง macro
+
+```text
+RM_IHPSG13_1P_1024x32_c2_bm_bist
+```
+
+พร้อม
+
+```text
+GDS
+LEF
+Verilog model
+Liberty
+```
+
+ดังนั้น Phase 2 สามารถสร้าง Harvard memory
+
+```text
+CPU
+ |
+ +--- SRAM0 = instruction memory
+ |
+ +--- SRAM1 = data memory
+```
+
+แต่ต้องเพิ่ม
+
+```text
+MACROS
+PDN_MACRO_CONNECTIONS
+PDN_CFG
+macro placement
+SRAM timing model
+functional initialization strategy
+```
+
+จึงควรทำหลัง baseline full-chip ผ่านแล้ว
+
+---
+
+# 55. Implementation Ladder ที่แนะนำ
+
+ไม่ควรกระโดดจาก RTL ไป GDS โดยตรง
+
+ใช้ขั้นบันได
+
+```text
+Level 0
+RTL lint
+    |
+Level 1
+CPU standalone synthesis
+    |
+Level 2
+chip_core RTL simulation
+    |
+Level 3
+chip_top RTL simulation
+    |
+Level 4
+Full-chip synthesis
+    |
+Level 5
+Floorplan
+    |
+Level 6
+Pad Ring + PDN
+    |
+Level 7
+Placement
+    |
+Level 8
+CTS
+    |
+Level 9
+Routing
+    |
+Level 10
+STA + DRC + LVS
+    |
+Level 11
+Gate-level simulation
+    |
+Level 12
+Tapeout package
+```
+
+หลักการนี้ทำให้ root cause ของ error แคบลงอย่างมาก
+
+---
+
+# 56. Debug Strategy
+
+เมื่อ flow fail ให้จำแนก error ก่อน
+
+## RTL error
+
+```text
+module not found
+package not found
+syntax error
+multiple drivers
+```
+
+กลับไปแก้ RTL
+
+---
+
+## Synthesis error
+
+```text
+unmapped cells
+unsupported construct
+hierarchy error
+```
+
+ตรวจ
+
+```text
+source files
+module name
+Slang
+black box
+```
+
+---
+
+## Floorplan error
+
+```text
+pad overlap
+core too large
+invalid die/core dimensions
+```
+
+แก้ geometry
+
+---
+
+## Placement error
+
+```text
+high utilization
+overflow
+congestion
+```
+
+แก้ density/core area
+
+---
+
+## CTS error
+
+```text
+max buffer count
+unresolved hold
+clock root incorrect
+```
+
+แก้ clock constraint และ placement
+
+---
+
+## Routing error
+
+```text
+GRT congestion
+unrouted nets
+DRT violations
+```
+
+กลับไปแก้ floorplan/placement
+
+---
+
+## LVS error
+
+```text
+net mismatch
+power mismatch
+macro mismatch
+```
+
+ตรวจ
+
+```text
+VDD/VSS
+pad power
+macro power
+black-box model
+```
+
+---
+
+# 57. Tapeout Readiness Checklist
+
+ก่อนเรียก design ว่า ready ต้องตอบ “ผ่าน” ทุกข้อ
+
+### RTL
+
+```text
+[ ] Lint clean
+[ ] Simulation pass
+[ ] Reset verified
+[ ] CPU observable
+```
+
+### Synthesis
+
+```text
+[ ] No unmapped cells
+[ ] No unresolved modules
+[ ] Cell count reasonable
+```
+
+### Floorplan
+
+```text
+[ ] Pads legal
+[ ] Core utilization reasonable
+[ ] No overlap
+```
+
+### Power
+
+```text
+[ ] VDD connected
+[ ] VSS connected
+[ ] IOVDD connected
+[ ] IOVSS connected
+[ ] Core ring complete
+```
+
+### Timing
+
+```text
+[ ] Setup WNS >= 0
+[ ] Setup TNS = 0
+[ ] Hold WNS >= 0
+[ ] Hold TNS = 0
+```
+
+### Routing
+
+```text
+[ ] 0 unrouted nets
+[ ] No congestion overflow
+```
+
+### Physical Verification
+
+```text
+[ ] Antenna clean
+[ ] DRC clean
+[ ] LVS clean
+```
+
+### Deliverables
+
+```text
+[ ] GDS
+[ ] LEF
+[ ] DEF
+[ ] netlist
+[ ] SDF
+[ ] timing reports
+[ ] DRC report
+[ ] LVS report
+[ ] exact config snapshot
+```
+
+---
+
+# 58. Recommended Version Roadmap
+
+แนะนำพัฒนา project เป็น version ต่อเนื่อง
+
+```text
+V1.0
+CPU + NOP source + PC output
+Full-chip baseline
+
+V1.1
+CPU + small instruction ROM
+Run real instruction sequence
+
+V1.2
+CPU + instruction ROM + data RAM
+Load/store verification
+
+V2.0
+CPU + IHP SRAM macro
+
+V2.1
+CPU + SRAM + GPIO
+
+V2.2
+CPU + SRAM + UART
+
+V3.0
+Minimal RISC-V SoC
+
+V4.0
+Tapeout-oriented full chip
+```
+
+---
+
+# 59. สรุป
+
+หัวใจสำคัญของ Full-Chip Implementation ของ `synpnr_osoc1_cpu` คือการเข้าใจก่อนว่า CPU RTL เดิมเป็น **processor core ที่ต้องการ external instruction/data memory**
+
+ดังนั้นการนำ CPU ออกสู่ IHP pad ring โดยตรงจะทำให้จำนวน IO สูงเกินความจำเป็น
+
+วิธี implementation ที่เหมาะสมกว่าคือ
+
+```text
+osoc1_cpu_core
+      |
+      v
+chip_core
+      |
+      +-- internal instruction source
+      +-- internal data response
+      +-- observable PC outputs
+      |
+      v
+chip_top
+      |
+      +-- IHP IO pads
+      +-- VDD/VSS pads
+      +-- IOVDD/IOVSS pads
+      +-- bondpads
+      |
+      v
+LibreLane Chip Flow
+      |
+      v
+GDSII
+```
+
+เมื่อ baseline นี้ผ่าน Synthesis → Floorplan → Pad Ring → PDN → Placement → CTS → Routing → STA → DRC → LVS แล้ว จึงค่อยเพิ่ม IHP SRAM macros และ peripherals เพื่อยกระดับจาก CPU test chip ไปสู่ RISC-V SoC เต็มรูปแบบ
